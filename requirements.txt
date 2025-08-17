@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+chromadb
+sentence-transformers
+requests
+beautifulsoup4
+newspaper3k
+python-docx
+PyMuPDF
+networkx
+pyvis
+pydantic
+python-dotenv
+numpy
+pandas
+tqdm
+duckduckgo-search
