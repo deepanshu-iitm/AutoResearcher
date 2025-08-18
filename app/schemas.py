@@ -34,3 +34,11 @@ class CollectRequest(BaseModel):
 class CollectResponse(BaseModel):
     query_used: str
     documents: List[Document]
+
+class MultiSourceResponse(BaseModel):
+    goal: str
+    total_documents: int
+    unique_documents: int
+    total_found_across_sources: int
+    documents: List[Document]
+    sources: dict
