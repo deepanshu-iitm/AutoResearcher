@@ -59,6 +59,24 @@ class DocumentProcessor:
         
         return chunks
     
+    def _sanitize_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Sanitize metadata to ensure ChromaDB compatibility."""
+        sanitized = {}
+        for key, value in metadata.items():
+            if value is None:
+                sanitized[key] = ""
+            elif isinstance(value, (list, tuple)):
+                # Convert lists to comma-separated strings
+                sanitized[key] = ", ".join(str(item) for item in value if item is not None)
+            elif isinstance(value, bool):
+                sanitized[key] = value
+            elif isinstance(value, (int, float)):
+                sanitized[key] = value
+            else:
+                # Convert everything else to string
+                sanitized[key] = str(value)
+        return sanitized
+    
     def process_document(self, document: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Process a single document into chunks with embeddings."""
         doc_id = document.get("id", "")
@@ -85,15 +103,15 @@ class DocumentProcessor:
                 "chunk_index": i,
                 "text": chunk,
                 "hash": chunk_hash,
-                "metadata": {
+                "metadata": self._sanitize_metadata({
                     "title": title,
-                    "source": document.get("source", ""),
-                    "year": document.get("year", 0),
-                    "authors": document.get("authors", []),
-                    "categories": document.get("categories", []),
-                    "link_abs": document.get("link_abs", ""),
-                    "link_pdf": document.get("link_pdf", "")
-                }
+                    "source": document.get("source"),
+                    "year": document.get("year"),
+                    "authors": document.get("authors"),
+                    "categories": document.get("categories"),
+                    "link_abs": document.get("link_abs"),
+                    "link_pdf": document.get("link_pdf")
+                })
             }
             processed_chunks.append(processed_chunk)
         
@@ -135,11 +153,12 @@ class DocumentProcessor:
         
         # Add chunk-specific metadata
         for i, chunk in enumerate(new_chunks):
-            metadatas[i].update({
+            chunk_metadata = self._sanitize_metadata({
                 "document_id": chunk["document_id"],
                 "chunk_index": chunk["chunk_index"],
                 "hash": chunk["hash"]
             })
+            metadatas[i].update(chunk_metadata)
         
         try:
             # Store in ChromaDB
@@ -150,42 +169,55 @@ class DocumentProcessor:
                 ids=ids
             )
             
+            print(f"✅ Successfully stored {len(new_chunks)} chunks in ChromaDB")
+            
             return {
                 "stored_count": len(new_chunks),
                 "total_processed": len(all_chunks),
-                "skipped_existing": len(all_chunks) - len(new_chunks)
+                "skipped_existing": len(all_chunks) - len(new_chunks),
+                "success": True
             }
             
         except Exception as e:
-            return {"stored_count": 0, "error": str(e)}
+            print(f"❌ ChromaDB storage failed: {str(e)}")
+            return {"stored_count": 0, "error": str(e), "success": False}
     
     def search_similar(self, query: str, n_results: int = 10, filter_metadata: Optional[Dict] = None) -> List[Dict[str, Any]]:
         """Search for similar documents using vector similarity."""
         try:
-            # Create query embedding
-            query_embedding = self.model.encode([query], convert_to_tensor=False).tolist()[0]
+            # Check if collection has any data
+            collection_count = self.collection.count()
+            if collection_count == 0:
+                print(f"⚠️ ChromaDB collection is empty - no documents to search")
+                return []
             
-            # Search in ChromaDB
+            print(f"🔍 Searching ChromaDB with {collection_count} documents for query: '{query}'")
+            
+            query_embedding = self.model.encode([query], convert_to_tensor=False).tolist()
+            
             results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results,
+                query_embeddings=query_embedding,
+                n_results=min(n_results, collection_count),
                 where=filter_metadata
             )
             
             # Format results
             formatted_results = []
-            for i in range(len(results["ids"][0])):
-                result = {
-                    "chunk_id": results["ids"][0][i],
-                    "text": results["documents"][0][i],
-                    "distance": results["distances"][0][i],
-                    "metadata": results["metadatas"][0][i]
-                }
-                formatted_results.append(result)
+            if results and results.get("documents"):
+                print(f"✅ Found {len(results['documents'][0])} similar documents")
+                for i in range(len(results["documents"][0])):
+                    formatted_results.append({
+                        "text": results["documents"][0][i],
+                        "metadata": results["metadatas"][0][i] if results.get("metadatas") else {},
+                        "distance": results["distances"][0][i] if results.get("distances") else 0.0
+                    })
+            else:
+                print(f"❌ No similar documents found for query: '{query}'")
             
             return formatted_results
             
         except Exception as e:
+            print(f"❌ Search error: {e}")
             return []
     
     def get_collection_stats(self) -> Dict[str, Any]:

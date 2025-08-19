@@ -15,3 +15,5 @@ venv/
 # Data / cache
 data/
 models/
+
+frontend/node_modules

@@ -94,46 +94,195 @@ async def collect_from_all_sources(
 
 
 def _deduplicate_documents(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Remove duplicate documents based on title similarity."""
+    """Smart deduplication that preserves source diversity and chooses best versions."""
     if not documents:
         return []
     
+    # Group potentially duplicate documents
+    duplicate_groups = []
+    processed = set()
+    
+    for i, doc1 in enumerate(documents):
+        if i in processed:
+            continue
+            
+        title1 = doc1.get("title", "").lower().strip()
+        if not title1:
+            continue
+            
+        # Start a new group with this document
+        group = [doc1]
+        processed.add(i)
+        
+        # Find similar documents
+        for j, doc2 in enumerate(documents[i+1:], i+1):
+            if j in processed:
+                continue
+                
+            title2 = doc2.get("title", "").lower().strip()
+            if not title2:
+                continue
+            
+            # Check similarity using multiple methods
+            similarity = _calculate_title_similarity(title1, title2)
+            
+            # More conservative threshold - only remove clear duplicates
+            if similarity > 0.9:  # Increased from 0.8 to 0.9
+                group.append(doc2)
+                processed.add(j)
+        
+        duplicate_groups.append(group)
+    
+    # Select best document from each group
     unique_docs = []
-    seen_titles = set()
+    source_counts = {"arXiv": 0, "Semantic Scholar": 0, "Wikipedia": 0}
     
-    for doc in documents:
-        title = doc.get("title", "").lower().strip()
-        
-        # Simple deduplication based on title
-        title_words = set(title.split())
-        is_duplicate = False
-        
-        for seen_title in seen_titles:
-            seen_words = set(seen_title.split())
-            # If 80% of words overlap, consider it a duplicate
-            if title_words and seen_words:
-                overlap = len(title_words & seen_words)
-                similarity = overlap / max(len(title_words), len(seen_words))
-                if similarity > 0.8:
-                    is_duplicate = True
-                    break
-        
-        if not is_duplicate and title:
-            unique_docs.append(doc)
-            seen_titles.add(title)
+    for group in duplicate_groups:
+        if len(group) == 1:
+            # No duplicates found
+            unique_docs.append(group[0])
+            source = group[0].get("source", "Unknown")
+            source_counts[source] = source_counts.get(source, 0) + 1
+        else:
+            # Choose best document from duplicates
+            best_doc = _select_best_duplicate(group, source_counts)
+            unique_docs.append(best_doc)
+            source = best_doc.get("source", "Unknown")
+            source_counts[source] = source_counts.get(source, 0) + 1
     
-    # Sort by year (newest first) and source priority
-    source_priority = {"arXiv": 3, "Semantic Scholar": 2, "Wikipedia": 1}
-    
+    # Sort by relevance and recency
     unique_docs.sort(
         key=lambda x: (
             x.get("year", 0),
-            source_priority.get(x.get("source", ""), 0)
+            _get_source_priority(x.get("source", "")),
+            len(x.get("abstract", ""))  # Prefer documents with abstracts
         ),
         reverse=True
     )
     
     return unique_docs
+
+
+def _calculate_title_similarity(title1: str, title2: str) -> float:
+    """Calculate similarity between two titles using multiple methods."""
+    # Method 1: Word overlap (Jaccard similarity)
+    words1 = set(title1.split())
+    words2 = set(title2.split())
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    intersection = len(words1 & words2)
+    union = len(words1 | words2)
+    jaccard = intersection / union if union > 0 else 0.0
+    
+    # Method 2: Longest common subsequence ratio
+    lcs_ratio = _lcs_ratio(title1, title2)
+    
+    # Method 3: Check for exact substring matches (handles different formatting)
+    substring_match = 0.0
+    if len(title1) > 20 and len(title2) > 20:  # Only for longer titles
+        # Remove common prefixes/suffixes and check core similarity
+        core1 = _extract_core_title(title1)
+        core2 = _extract_core_title(title2)
+        if core1 in core2 or core2 in core1:
+            substring_match = 0.3
+    
+    # Combine methods with weights
+    final_similarity = (jaccard * 0.6) + (lcs_ratio * 0.3) + (substring_match * 0.1)
+    return final_similarity
+
+
+def _lcs_ratio(s1: str, s2: str) -> float:
+    """Calculate longest common subsequence ratio."""
+    def lcs_length(x, y):
+        m, n = len(x), len(y)
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+        
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if x[i-1] == y[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                else:
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+        return dp[m][n]
+    
+    lcs_len = lcs_length(s1, s2)
+    max_len = max(len(s1), len(s2))
+    return lcs_len / max_len if max_len > 0 else 0.0
+
+
+def _extract_core_title(title: str) -> str:
+    """Extract core part of title by removing common prefixes/suffixes."""
+    # Remove common academic prefixes
+    prefixes = ["a study of", "an analysis of", "on the", "towards", "toward"]
+    title_lower = title.lower()
+    
+    for prefix in prefixes:
+        if title_lower.startswith(prefix):
+            title = title[len(prefix):].strip()
+            break
+    
+    # Remove version numbers, years in parentheses, etc.
+    import re
+    title = re.sub(r'\([^)]*\d{4}[^)]*\)', '', title)  # Remove years in parentheses
+    title = re.sub(r'v\d+(\.\d+)*', '', title)  # Remove version numbers
+    
+    return title.strip()
+
+
+def _select_best_duplicate(group: List[Dict[str, Any]], source_counts: Dict[str, int]) -> Dict[str, Any]:
+    """Select the best document from a group of duplicates."""
+    # Scoring criteria
+    def score_document(doc):
+        score = 0
+        
+        # Prefer sources with fewer documents (diversity)
+        source = doc.get("source", "Unknown")
+        source_count = source_counts.get(source, 0)
+        if source_count == 0:
+            score += 10  # Strong preference for new sources
+        elif source_count < 3:
+            score += 5   # Moderate preference for underrepresented sources
+        
+        # Prefer more recent papers
+        year = doc.get("year", 0)
+        if year >= 2020:
+            score += 5
+        elif year >= 2015:
+            score += 3
+        elif year >= 2010:
+            score += 1
+        
+        # Prefer papers with abstracts
+        if doc.get("abstract"):
+            score += 3
+            # Longer abstracts are often more informative
+            abstract_len = len(doc.get("abstract", ""))
+            if abstract_len > 500:
+                score += 2
+            elif abstract_len > 200:
+                score += 1
+        
+        # Prefer papers with author information
+        if doc.get("authors"):
+            score += 2
+        
+        # Source quality preference (but lower weight to preserve diversity)
+        source_quality = {"arXiv": 2, "Semantic Scholar": 2, "Wikipedia": 1}
+        score += source_quality.get(source, 0)
+        
+        return score
+    
+    # Select document with highest score
+    best_doc = max(group, key=score_document)
+    return best_doc
+
+
+def _get_source_priority(source: str) -> int:
+    """Get source priority for sorting."""
+    priorities = {"arXiv": 3, "Semantic Scholar": 2, "Wikipedia": 1}
+    return priorities.get(source, 0)
 
 
 def rank_documents_by_relevance(
