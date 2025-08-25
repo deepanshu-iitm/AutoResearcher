@@ -3,10 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.env
 .venv/
 .venv*/
-.env.*
 .envrc
 venv/
 # OS
@@ -17,3 +15,5 @@ data/
 models/
 
 frontend/node_modules
+config.bat
+node_modules
